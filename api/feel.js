@@ -1,76 +1,112 @@
 // api/feel.js
-// Vercel Serverless Function (Node.js)
-// Requires an environment variable: OPENAI_API_KEY
+// Vercel serverless function with CORS + stronger prompt + few-shot examples.
+// Requires: OPENAI_API_KEY set in Vercel → Project → Settings → Environment Variables
 
 export default async function handler(req, res) {
-  if (req.method !== "POST") {
-    // Simple "alive" check when opening in the browser
-    return res.status(405).json({ error: "Use POST", hint: "POST JSON { input: 'I feel ...' }" });
-  }
+  const CORS = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST,OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type'
+  };
+  if (req.method === 'OPTIONS') return res.status(200).set(CORS).end();
+  if (req.method !== 'POST') return res.status(405).set(CORS).json({ error: 'Use POST', hint: "POST JSON { input: 'I feel ...' }" });
 
   try {
-    const { input, profile } = (req.body || {});
-    if (!input || typeof input !== "string") {
-      return res.status(400).json({ error: "Missing 'input' (string) in request body" });
+    // NOTE: front-end will send { input: "...user text..." }
+    const { input } = req.body || {};
+    if (!input || typeof input !== 'string') {
+      return res.status(400).set(CORS).json({ error: "Missing 'input' (string) in request body" });
     }
 
-    // System prompt mirrors your “Despair Not” GPT intent: brief, authentic, referenced
     const system = `
-You are a gentle Islamic spiritual guide named Khayrah. Given a user's emotion or short text:
-- Classify/understand the feeling
-- Provide Qur'an ayah references (do not paste very long quotes; short lines are fine)
-- Provide hadith references
-- Offer concise counsel drawing from classical scholars (e.g., al-Ghazali, Ibn al-Qayyim)
-- Provide a short uplifting pep-talk
-- Encourage immediate local help if the text suggests crisis or harm
-Return ONLY JSON with keys:
+You are Khayrah, a gentle Islamic spiritual guide.
+Task: given a short user feeling or text, 1) classify it to a *specific* emotion label,
+2) choose Qur'an ayah(s) that fit the feeling with brief English line(s) + Arabic if helpful + reference,
+3) choose an authentic hadith with reference (short line),
+4) give concise counsel drawing from classical scholars (e.g., al-Ghazālī, Ibn al-Qayyim, Ibn ʿAṭā’ Allāh) with a source/ref if possible,
+5) suggest a short dua that fits the feeling,
+6) craft a one-paragraph uplifting pep-talk,
+7) propose 6–10 *related feelings* as suggestions (single words/short phrases).
+
+• Keep text brief, specific to the input, and not repetitive across different feelings.
+• Never give medical/clinical advice; if crisis language appears, gently urge seeking immediate local help.
+• Output ONLY JSON with this exact shape:
+
 {
   "mapped": {
-    "feeling": string,
+    "feeling": string,                       // e.g. "burnout", "anxious anticipation"
     "quran":   { "ar"?: string, "en": string, "ref": string },
     "quran2"?: { "ar"?: string, "en": string, "ref": string },
     "hadith":  { "en": string, "ar"?: string, "ref": string },
     "counsel": { "by": string, "text": string, "ref"?: string },
     "dua":     string
   },
-  "peptalk": string
+  "peptalk": string,
+  "suggestions": [string, ...]               // related feelings for quick buttons
 }
-Keep it concise and authentic. Avoid medical or clinical advice.
+
+Short, accurate refs only (e.g., "Q 94:5–6", "Bukhari 6114").
     `.trim();
+
+    // Few-shot examples so it doesn't answer the same way for everything:
+    const examples = [
+      { role: "user", content: "Emotion/Text: I feel overwhelmed by deadlines and family duties." },
+      { role: "assistant", content: JSON.stringify({
+        mapped:{
+          feeling:"overwhelmed",
+          quran:{ en:"Seek help through patience and prayer.", ar:"وَاسْتَعِينُوا بِالصَّبْرِ وَالصَّلَاةِ", ref:"Q 2:45" },
+          quran2:{ en:"Allah does not burden a soul beyond its capacity.", ar:"لَا يُكَلِّفُ اللَّهُ نَفْسًا إِلَّا وُسْعَهَا", ref:"Q 2:286" },
+          hadith:{ en:"The strong one controls himself when angry.", ref:"Muslim 2609" },
+          counsel:{ by:"al-Ghazālī (adapted)", text:"Break tasks into small trusts: ablution, two rakʿāt, dhikr; then handle the next right action.", ref:"Iḥyāʾ ʿUlūm al-Dīn (themes)" },
+          dua:"حَسْبُنَا اللَّهُ وَنِعْمَ الْوَكِيلُ"
+        },
+        peptalk:"You are not alone under the load—place it with Allah, then take one small step. Rest is allowed; your worth isn’t your output.",
+        suggestions:["stressed","burnout","tired","decision fatigue","under pressure","time anxiety","restless","worn out"]
+      }) },
+
+      { role: "user", content: "Emotion/Text: I’m guilty about my mistakes and want to return to Allah." },
+      { role: "assistant", content: JSON.stringify({
+        mapped:{
+          feeling:"guilt with tawbah",
+          quran:{ en:"O My servants who have transgressed against themselves, do not despair of Allah’s mercy.", ar:"لَا تَقْنَطُوا مِن رَّحْمَةِ ٱللَّهِ", ref:"Q 39:53" },
+          hadith:{ en:"All children of Adam err, and the best of those who err are those who repent.", ref:"Tirmidhī 2499" },
+          counsel:{ by:"Ibn al-Qayyim (adapted)", text:"Let remorse lead to action: admit, stop, resolve, repair. Sweetness follows sincere tawbah.", ref:"Madarij al-Sālikīn (themes)" },
+          dua:"رَبِّ اغْفِرْ لِي وَتُبْ عَلَيَّ إِنَّكَ أَنْتَ التَّوَّابُ الرَّحِيمُ"
+        },
+        peptalk:"Your regret is a door that Allah Himself opened. Step through it—He loves those who turn back to Him.",
+        suggestions:["repentance","shame","remorse","seeking forgiveness","fear of Allah","renewal","hope","self-reproach"]
+      }) }
+    ];
 
     const payload = {
       model: "gpt-4o-mini",
+      temperature: 0.4,
+      response_format: { type: "json_object" },
       messages: [
         { role: "system", content: system },
-        { role: "user", content: `Emotion/Text: ${input}\nProfile: ${profile || "despair-not"}` }
-      ],
-      response_format: { type: "json_object" },
-      temperature: 0.3
+        ...examples,
+        { role: "user", content: `Emotion/Text: ${input}` }
+      ]
     };
 
     const r = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`
-      },
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${process.env.OPENAI_API_KEY}` },
       body: JSON.stringify(payload)
     });
 
     if (!r.ok) {
-      const t = await r.text();
-      return res.status(r.status).json({ error: "OpenAI error", detail: t });
+      return res.status(r.status).set(CORS).json({ error: "OpenAI error", detail: await r.text() });
     }
 
     const data = await r.json();
-    const raw = data?.choices?.[0]?.message?.content || "{}";
+    const content = data?.choices?.[0]?.message?.content || "{}";
 
     let parsed;
-    try { parsed = JSON.parse(raw); }
-    catch (e) { parsed = { peptalk: raw }; }  // fallback: return text if not valid JSON
+    try { parsed = JSON.parse(content); } catch { parsed = { peptalk: content }; }
 
-    return res.status(200).json(parsed);
+    return res.status(200).set(CORS).json(parsed);
   } catch (err) {
-    return res.status(500).json({ error: "Server error", detail: String(err) });
+    return res.status(500).set(CORS).json({ error: "Server error", detail: String(err) });
   }
 }
